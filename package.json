@@ -36,6 +36,7 @@
     "@types/lodash": "4.14.168",
     "blitz": "0.29.7",
     "cheerio": "1.0.0-rc.5",
+    "discord.js": "12.5.1",
     "lodash": "4.17.20",
     "react": "0.0.0-experimental-3310209d0",
     "react-dom": "0.0.0-experimental-3310209d0",

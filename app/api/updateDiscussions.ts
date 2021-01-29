@@ -1,17 +1,25 @@
 import { BlitzApiRequest, BlitzApiResponse } from "blitz"
 import { load } from "cheerio"
 import db from "db"
-import { compact } from "lodash"
+
+import { sendMessage } from "app/lib/discord"
+import { isDev } from "app/utils/getConfig"
 
 interface DiscussionDom {
   id: number
+  link: string
   title: string
   author: string
-  state: "Answered" | "Unanswered"
+  category: string
+  state: "Answered" | "Unanswered" | undefined
   createdAt: Date
 }
 
-function isState(state: string): state is DiscussionDom["state"] {
+function isState(state?: string): state is DiscussionDom["state"] {
+  if (!state) {
+    return true
+  }
+
   if (["Answered", "Unanswered"].includes(state)) {
     return true
   }
@@ -19,13 +27,23 @@ function isState(state: string): state is DiscussionDom["state"] {
   return false
 }
 
+const formatMessage = (discussion: DiscussionDom) => {
+  return `New discussion was posted in ${discussion.category} by ${discussion.author}:
+**${discussion.title}**
+${discussion.link}`
+}
+
+const REPO_URL = isDev()
+  ? "https://github.com/Zeko369/testing-discussion-bot/"
+  : "https://github.com/blitz-js/blitz/"
+
 const handler = async (req: BlitzApiRequest, res: BlitzApiResponse) => {
   const scrapedDiscussions: DiscussionDom[] = []
   let page = 1
   let hasNext = true
 
   while (hasNext) {
-    const r = await fetch(`https://github.com/blitz-js/blitz/discussions?page=${page}`)
+    const r = await fetch(`${REPO_URL}discussions?page=${page}`)
     const html = await r.text()
 
     const dom = load(html)
@@ -34,7 +52,8 @@ const handler = async (req: BlitzApiRequest, res: BlitzApiResponse) => {
     list.children().each(function (index, _) {
       const header = dom(this).find('a[data-hovercard-type="discussion"]')
       const title = header.text().trim()
-      const id = parseInt(header.attr("href")?.split("/").reverse()[0] || "")
+      const link = `https://github.com/${header.attr("href") || ""}`
+      const id = parseInt(link.split("/").reverse()[0] || "")
 
       if (Number.isNaN(id)) {
         if (header.length === 0) {
@@ -48,6 +67,7 @@ const handler = async (req: BlitzApiRequest, res: BlitzApiResponse) => {
 
       const author = desc.find('a[data-hovercard-type="user"]').text().trim()
       const created_at = desc.find("relative-time")
+      const category = desc.find(":nth-child(5)").text().trim()
       const state = desc.children().last().text().trim().slice(2)
 
       if (!isState(state)) {
@@ -61,32 +81,47 @@ const handler = async (req: BlitzApiRequest, res: BlitzApiResponse) => {
       scrapedDiscussions.push({
         id,
         title,
+        link,
         author,
+        category,
         createdAt,
         state,
       })
     })
 
-    hasNext = !dom(".next_page").hasClass("disabled")
-    page++
+    const nextButton = dom(".next_page").get()
+
+    if (nextButton.length === 1) {
+      hasNext = !dom(".next_page").hasClass("disabled")
+      page++
+    } else {
+      hasNext = false
+    }
   }
 
   const discussions = await db.discussion.findMany()
 
-  const promises = compact(
-    scrapedDiscussions.map((discussion) => {
+  // Hack to not send all existing
+  let dontSend = false
+  if (discussions.length === 0) {
+    dontSend = true
+  }
+
+  await Promise.all(
+    scrapedDiscussions.map(async (discussion) => {
       const dbDiscussion = discussions.find((d) => d.id === discussion.id)
 
       if (!dbDiscussion) {
-        console.log("Send new")
-        return db.discussion.create({ data: { id: discussion.id } })
+        if (!dontSend) {
+          await sendMessage(formatMessage(discussion))
+        }
+
+        await db.discussion.create({ data: { id: discussion.id } })
       }
 
       return undefined
     })
   )
-
-  await db.$transaction(promises)
 
   res.send(scrapedDiscussions.length)
 }
